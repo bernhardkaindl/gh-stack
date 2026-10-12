@@ -151,11 +151,12 @@ func TestSubmit_CreatesPRsAndStack(t *testing.T) {
 
 	assert.NoError(t, err)
 
-	// Branches should be pushed (sequentially, one per branch)
-	require.Len(t, pushCalls, 2)
+	// All branches are pushed together in a single atomic, forced push
+	require.Len(t, pushCalls, 1)
 	assert.Equal(t, "origin", pushCalls[0].remote)
-	assert.Equal(t, []string{"b1"}, pushCalls[0].branches)
-	assert.Equal(t, []string{"b2"}, pushCalls[1].branches)
+	assert.Equal(t, []string{"b1", "b2"}, pushCalls[0].branches)
+	assert.True(t, pushCalls[0].force)
+	assert.True(t, pushCalls[0].atomic)
 
 	// PRs should be created
 	assert.Equal(t, []string{"b1", "b2"}, createdPRs)
@@ -346,6 +347,52 @@ func TestSubmit_PushFailure(t *testing.T) {
 	assert.Contains(t, output, "failed to push")
 }
 
+// TestSubmit_AtomicPushFailureCreatesNoPRs verifies that, without a pending
+// modify, a rejected push aborts before any PR is created or updated.
+func TestSubmit_AtomicPushFailureCreatesNoPRs(t *testing.T) {
+	s := stack.Stack{
+		Trunk: stack.BranchRef{Branch: "main"},
+		Branches: []stack.BranchRef{
+			{Branch: "b1"},
+			{Branch: "b2"},
+			{Branch: "b3"},
+		},
+	}
+
+	tmpDir := t.TempDir()
+	writeStackFile(t, tmpDir, s)
+
+	var pushCalls []pushCall
+	mock := newSubmitMock(tmpDir, "b1")
+	mock.PushFn = func(remote string, branches []string, force, atomic bool) error {
+		pushCalls = append(pushCalls, pushCall{remote, branches, force, atomic})
+		return fmt.Errorf("stale info for b2")
+	}
+
+	restore := git.SetOps(mock)
+	defer restore()
+
+	creations := 0
+	cfg, _, errR := config.NewTestConfig()
+	cfg.GitHubClientOverride = &github.MockClient{
+		CreatePRFn: func(_, _, _, _ string, _ bool) (*github.PullRequest, error) {
+			creations++
+			return &github.PullRequest{Number: 1}, nil
+		},
+	}
+	err := runSubmit(cfg, &submitOptions{auto: true})
+
+	cfg.Err.Close()
+	errOut, _ := io.ReadAll(errR)
+
+	assert.ErrorIs(t, err, ErrSilent)
+	assert.Contains(t, string(errOut), "failed to push")
+	require.Len(t, pushCalls, 1)
+	assert.Equal(t, []string{"b1", "b2", "b3"}, pushCalls[0].branches)
+	assert.True(t, pushCalls[0].atomic)
+	assert.Zero(t, creations, "no PR should be created after a failed push")
+}
+
 func TestSubmit_SkipsMergedBranches(t *testing.T) {
 	s := stack.Stack{
 		Trunk: stack.BranchRef{Branch: "main"},
@@ -489,9 +536,8 @@ func TestSubmit_ForksWhenRemoteStackFullyMerged(t *testing.T) {
 			require.NoError(t, err)
 
 			// Only the new branches are pushed; merged ones are left behind.
-			require.Len(t, pushCalls, 2)
-			assert.Equal(t, []string{"b3"}, pushCalls[0].branches)
-			assert.Equal(t, []string{"b4"}, pushCalls[1].branches)
+			require.Len(t, pushCalls, 1)
+			assert.Equal(t, []string{"b3", "b4"}, pushCalls[0].branches)
 
 			// Fork messaging.
 			assert.Contains(t, output, "Every PR in this stack has already been merged")
@@ -2059,7 +2105,7 @@ func TestSubmit_PRFailureWithoutPendingModifyRemainsBestEffort(t *testing.T) {
 	require.NoError(t, runSubmit(cfg, &submitOptions{auto: true}))
 
 	_, output := commandOutput(t, cfg, outR, errR)
-	assert.Equal(t, 2, pushes)
+	assert.Equal(t, 1, pushes)
 	assert.Equal(t, 2, creations)
 	assert.Contains(t, output, "failed to create PR for b2")
 	assert.NoFileExists(t, modify.StatePath(dir))
@@ -2563,7 +2609,7 @@ func TestSubmit_FetchesBeforePush(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, []string{"b1", "b2"}, fetchedBranches, "should fetch active branches")
 	// fetch must come before all pushes
-	require.True(t, len(callOrder) >= 3, "expected at least 3 calls (fetch + 2 pushes)")
+	require.Equal(t, []string{"fetch", "push"}, callOrder, "expected fetch followed by a single push")
 	assert.Equal(t, "fetch", callOrder[0], "fetch must happen before any push")
 }
 

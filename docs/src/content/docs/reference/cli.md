@@ -341,7 +341,7 @@ gh stack submit [flags]
 | `--open` | Create new PRs as ready for review instead of drafts, and mark existing PRs as ready for review |
 | `--remote <name>` | Remote to push to (defaults to auto-detected remote) |
 
-Creates a Stacked PR for every branch in the stack, pushing branches to the remote. After creating PRs, `submit` automatically creates a **Stack** on GitHub to link the PRs together. If the stack already exists on GitHub (e.g., from a previous submit), new PRs are added to the existing stack.
+Creates a Stacked PR for every branch in the stack, pushing branches to the remote. All active branches are pushed together in a single atomic push (with per-branch `--force-with-lease` checks), so either every branch is updated or none are. When finishing a pending `gh stack modify`, branches are instead pushed one at a time so each PR's base can be corrected before the next branch is pushed. After creating PRs, `submit` automatically creates a **Stack** on GitHub to link the PRs together. If the stack already exists on GitHub (e.g., from a previous submit), new PRs are added to the existing stack.
 
 If every PR in the stack has already been merged, that stack is complete and can't be extended. In that case `submit` automatically starts a **new** stack rooted at the trunk for your unmerged branches and creates it on GitHub, leaving the merged stack untouched.
 

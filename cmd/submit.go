@@ -230,10 +230,27 @@ func runSubmit(cfg *config.Config, opts *submitOptions) error {
 		drafts = collected
 	}
 
-	// Push each branch and create/update its PR in stack order (bottom to top).
-	// Sequential pushing ensures each branch's base is up-to-date on the
-	// remote before the next branch is pushed, preventing race conditions.
-	cfg.Printf("Pushing to %s...", remote)
+	// Push branches, then create/update each PR in stack order (bottom to top).
+	//
+	// Normally all active branches go up in a single atomic push. GitHub then
+	// receives every rewritten ref in one push event, which lets it synchronize
+	// each PR once (for its head ref) rather than once for its head and again
+	// for its base, and the remote never holds a partially-updated stack.
+	//
+	// When a modify is pending, the stack's shape may have changed (branches
+	// reordered, dropped, or folded), so PR bases on GitHub can be stale. In
+	// that case push branches one at a time and fix each PR's base before
+	// pushing the next, so no PR is compared against an outdated base.
+	sequentialPush := pendingModify
+	if sequentialPush {
+		cfg.Printf("Pushing to %s...", remote)
+	} else {
+		cfg.Printf("Pushing %d %s to %s...", len(activeBranches), plural(len(activeBranches), "branch", "branches"), remote)
+		if err := git.Push(remote, activeBranches, true, true); err != nil {
+			cfg.Errorf("failed to push: %s", err)
+			return ErrSilent
+		}
+	}
 	allPRsSubmitted := len(queued) == 0
 	submittedPRs := make(map[string]int, len(activeBranches))
 	for i, b := range s.Branches {
@@ -241,10 +258,11 @@ func runSubmit(cfg *config.Config, opts *submitOptions) error {
 			continue
 		}
 
-		// Push this branch
-		if err := git.Push(remote, []string{b.Branch}, true, false); err != nil {
-			cfg.Errorf("failed to push %s: %s", b.Branch, err)
-			return ErrSilent
+		if sequentialPush {
+			if err := git.Push(remote, []string{b.Branch}, true, false); err != nil {
+				cfg.Errorf("failed to push %s: %s", b.Branch, err)
+				return ErrSilent
+			}
 		}
 
 		// Find or create PR, and fix base if needed
