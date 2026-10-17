@@ -254,8 +254,9 @@ func (d *defaultOps) CreateBranch(name, base string) error {
 	return d.runSilent("branch", name, base)
 }
 
+// TODO send pull.stacked option on force push after rebase only?
 func (d *defaultOps) Push(remote string, branches []string, force, atomic bool) error {
-	args := []string{"push", remote}
+	args := []string{"push", "-o", "pull.stacked", remote}
 	if force {
 		// Build explicit per-branch leases and refspecs. This removes
 		// dependence on push.default / upstream configuration and
