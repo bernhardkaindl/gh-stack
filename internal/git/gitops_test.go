@@ -1746,3 +1746,23 @@ func TestIntegration_Push_SendsStackPushOption(t *testing.T) {
 		})
 	}
 }
+
+// Remotes that don't advertise push options must still accept pushes.
+func TestIntegration_Push_FallsBackWithoutPushOptionSupport(t *testing.T) {
+	bareDir, cloneDir := setupBareAndClone(t)
+	restore := withGitDir(t, cloneDir)
+	defer restore()
+
+	out, err := exec.Command("git", "-c", "safe.bareRepository=all", "-C", bareDir,
+		"config", "receive.advertisePushOptions", "false").CombinedOutput()
+	require.NoError(t, err, string(out))
+
+	gitExec(t, cloneDir, "checkout", "-b", "b1")
+	writeFile(t, cloneDir, "b1.txt", "v1")
+	gitExec(t, cloneDir, "add", ".")
+	gitExec(t, cloneDir, "commit", "-m", "b1")
+
+	d := &defaultOps{}
+	require.NoError(t, d.Push("origin", []string{"b1"}, true, true))
+	assert.Equal(t, gitExec(t, cloneDir, "rev-parse", "b1"), remoteBranchSHA(t, bareDir, "b1"))
+}
