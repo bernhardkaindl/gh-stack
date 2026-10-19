@@ -55,9 +55,6 @@ func TestPush_PendingModify(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if test.wantBlocked && os.Getenv("GH_STACK_RUN_KNOWN_FAILURES") != "1" {
-				t.Skip("known bug: push allows pending modifications; set GH_STACK_RUN_KNOWN_FAILURES=1 to reproduce")
-			}
 			dir := t.TempDir()
 			writeStackFile(t, dir, stack.Stack{
 				ID:       "123",

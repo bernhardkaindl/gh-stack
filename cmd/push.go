@@ -5,6 +5,7 @@ import (
 
 	"github.com/github/gh-stack/internal/config"
 	"github.com/github/gh-stack/internal/git"
+	"github.com/github/gh-stack/internal/modify"
 	"github.com/github/gh-stack/internal/stack"
 	"github.com/spf13/cobra"
 )
@@ -24,7 +25,10 @@ func PushCmd(cfg *config.Config) *cobra.Command {
 Uses explicit per-branch --force-with-lease checks. Updates are not atomic: a
 branch may update even if another branch is rejected. Fix the rejected branch
 and run the command again; branches already updated will be unchanged.
-Merged and queued branches are automatically skipped.`,
+Merged and queued branches are automatically skipped.
+
+After modifying the stack, use 'gh stack submit' instead so that the remote
+stack and PR base branches are updated safely.`,
 		Example: `  # Push active stack branches to the default remote
   $ gh stack push
 
@@ -75,6 +79,17 @@ func runPush(cfg *config.Config, opts *pushOptions) error {
 		return ErrDisambiguate
 	}
 	s := stacks[0]
+
+	state, err := modify.LoadState(gitDir)
+	if err != nil {
+		cfg.Errorf("reading modify recovery state: %s", err)
+		return ErrModifyRecovery
+	}
+	if state != nil && state.Phase == modify.PhasePendingSubmit && modify.MatchesStack(state, s) {
+		cfg.Errorf("this stack has a pending modification; pushing before updating PR bases is unsafe")
+		cfg.Printf("Run `%s` to push changes and update the stack on GitHub", cfg.ColorCyan("gh stack submit"))
+		return ErrSilent
+	}
 
 	// Push all active branches with explicit per-branch leases.
 	remote, err := pickRemote(cfg, currentBranch, opts.remote)
