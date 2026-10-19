@@ -3,11 +3,14 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/github/gh-stack/internal/config"
 	"github.com/github/gh-stack/internal/git"
 	"github.com/github/gh-stack/internal/github"
+	"github.com/github/gh-stack/internal/modify"
 	"github.com/github/gh-stack/internal/stack"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,6 +23,102 @@ func newPushMock(tmpDir string, currentBranch string) *git.MockOps {
 		CurrentBranchFn: func() (string, error) { return currentBranch, nil },
 		ResolveRemoteFn: func(string) (string, error) { return "origin", nil },
 		PushFn:          func(string, []string, bool, bool) error { return nil },
+	}
+}
+
+func TestPush_PendingModify(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		pendingID   string
+		branches    []string
+		wantBlocked bool
+	}{
+		{
+			name:        "matching remote stack",
+			pendingID:   "123",
+			branches:    []string{"b2", "b1"},
+			wantBlocked: true,
+		},
+		{
+			name:        "matching branch identity after remote stack deletion",
+			branches:    []string{"b1", "b2"},
+			wantBlocked: true,
+		},
+		{
+			name:      "unrelated remote stack",
+			pendingID: "456",
+			branches:  []string{"other"},
+		},
+		{
+			name:     "unrelated branches with the same trunk",
+			branches: []string{"other"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if test.wantBlocked && os.Getenv("GH_STACK_RUN_KNOWN_FAILURES") != "1" {
+				t.Skip("known bug: push allows pending modifications; set GH_STACK_RUN_KNOWN_FAILURES=1 to reproduce")
+			}
+			dir := t.TempDir()
+			writeStackFile(t, dir, stack.Stack{
+				ID:       "123",
+				Trunk:    stack.BranchRef{Branch: "main"},
+				Branches: []stack.BranchRef{{Branch: "b1"}, {Branch: "b2"}},
+			})
+			require.NoError(t, modify.SaveState(dir, &modify.StateFile{
+				SchemaVersion:      1,
+				Phase:              modify.PhasePendingSubmit,
+				PriorRemoteStackID: test.pendingID,
+				StackName:          "main",
+				StackBranches:      test.branches,
+			}))
+			journalBefore, err := os.ReadFile(modify.StatePath(dir))
+			require.NoError(t, err)
+			catalogBefore, err := os.ReadFile(filepath.Join(dir, "gh-stack"))
+			require.NoError(t, err)
+
+			var calls []string
+			mock := newPushMock(dir, "b1")
+			mock.ResolveRemoteFn = func(string) (string, error) {
+				calls = append(calls, "resolve remote")
+				return "origin", nil
+			}
+			mock.FetchBranchesFn = func(string, []string) error {
+				calls = append(calls, "fetch")
+				return nil
+			}
+			mock.PushFn = func(string, []string, bool, bool) error {
+				calls = append(calls, "push")
+				return nil
+			}
+			restore := git.SetOps(mock)
+			defer restore()
+
+			cfg, outR, errR := config.NewTestConfig()
+			cfg.GitHubClientOverride = &github.MockClient{
+				GetStackFn: func(int) (*github.RemoteStack, error) {
+					calls = append(calls, "read remote stack")
+					return nil, nil
+				},
+			}
+			err = runPush(cfg, &pushOptions{})
+			_, output := commandOutput(t, cfg, outR, errR)
+
+			if test.wantBlocked {
+				assert.ErrorIs(t, err, ErrSilent)
+				assert.Contains(t, output, "gh stack submit")
+				assert.NotContains(t, output, "Pushed")
+				assert.Empty(t, calls, "pending modification must be rejected before remote access")
+				catalogAfter, readErr := os.ReadFile(filepath.Join(dir, "gh-stack"))
+				require.NoError(t, readErr)
+				assert.Equal(t, catalogBefore, catalogAfter)
+			} else {
+				assert.NoError(t, err)
+				assert.Contains(t, calls, "push", "another stack's modification must not block pushing")
+			}
+			journalAfter, err := os.ReadFile(modify.StatePath(dir))
+			require.NoError(t, err)
+			assert.Equal(t, journalBefore, journalAfter)
+		})
 	}
 }
 
